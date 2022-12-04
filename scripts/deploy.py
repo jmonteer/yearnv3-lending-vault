@@ -20,7 +20,7 @@ class ROLES(IntFlag):
     ACCOUNTING_MANAGER = 8
 
 
-if True:
+def deploy_and_setup(test=False):
     print("ChainID", chain.chain_id)
     publish_flag = False
     if chain.chain_id == 1:
@@ -29,8 +29,6 @@ if True:
         # return
     
     # we default to local node
-    w3 = Web3(HTTPProvider(os.getenv("CHAIN_PROVIDER", "http://127.0.0.1:8545")))
-    
     vault_factory = project.dependencies["yearn-vaults-v3"]["master"].VaultFactory
     vault = project.dependencies["yearn-vaults-v3"]["master"].VaultV3
     debtmanager = project.dependencies["debt-manager"]["master"].LenderDebtManager
@@ -39,7 +37,7 @@ if True:
     strategy_comp_v2 = project.dependencies["strategy-comp-v2"]["master"].Strategy
     
     deployer = accounts.load("v3_deployer")
-    
+    deployer.set_autosign(True)
     from copy import deepcopy
 
     vault_copy = deepcopy(vault)
@@ -69,7 +67,9 @@ if True:
     
     # deploy debt lender
     debt_manager = deployer.deploy(debtmanager, vault.address, max_priority_fee="1 gwei", max_fee="100 gwei", sender=deployer)
-    
+        
+    vault.set_role(debt_manager.address, ROLES.DEBT_MANAGER, sender=deployer)
+
     strategies = []
     
     # deploy Aave V2 strategy
@@ -86,20 +86,35 @@ if True:
     
     # set up
     total_assets = int(10_000 * int(10 ** vault.decimals()))
-    debt_per_strategy = total_assets / len(strategies)
     vault.set_deposit_limit(total_assets, sender=deployer)
     # setup strategies
     for s in strategies:
         vault.add_strategy(s.address, max_priority_fee="1 gwei", max_fee="100 gwei", sender=deployer)
         debt_manager.addStrategy(s.address, max_priority_fee="1 gwei", max_fee="100 gwei", sender=deployer)
-        vault.update_max_debt_for_strategy(s.address, int(total_assets), max_priority_fee="1 gwei", max_fee="100 gwei", sender=deployer)
+        vault.update_max_debt_for_strategy(s.address, int(2 * total_assets), max_priority_fee="1 gwei", max_fee="100 gwei", sender=deployer)
      
+    print("DEPLOYER:", deployer.address)
+    print("Vault:", vault.address)
+    print("Debt Manager:", debt_manager.address)
+    print("Strategies:")
+    for s in strategies:
+        print("\t", s.name(), s.address)
+
+    if test:
+        test_vault(deployer, vault, debt_manager, strategies, total_assets)
+
+    return (deployer, vault, debt_manager, strategies, total_assets)
+
+def test_vault(deployer, vault, debt_manager, strategies, total_assets, unwind_vault=False):
     # TEST
+    print("TESTING WITH FUNDS")
     asset = Contract(ASSET_ADDRESS)
     whale = accounts[ASSET_WHALE_ADDRESS]
     asset.approve(vault.address, total_assets, sender=whale)
     vault.deposit(total_assets, whale.address, sender=whale)
     
+    debt_per_strategy = total_assets / len(strategies)
+
     for s in strategies:
        vault.update_debt(s.address, int(debt_per_strategy), max_priority_fee="1 gwei", max_fee="100 gwei", sender=deployer)
        strat_name = s.name()
@@ -108,7 +123,20 @@ if True:
        print(strat_name, strat_funds / (10 ** vault.decimals()), strat_assets / (10 ** vault.decimals()))
     
     tx = debt_manager.estimateAdjustPosition()
-    print(tx.return_value)
+    print(tx.items())
+
+    for s in strategies: 
+       strat_name = s.name()
+       strat_funds = vault.strategies(s.address).current_debt
+       strat_assets = s.totalAssets()
+
+       print(strat_name, strat_funds / (10 ** vault.decimals()), strat_assets / (10 ** vault.decimals()))
+
+    # let 1 week pass
+    chain.mine(timestamp=chain.pending_timestamp + 7 * 24 * 3600)
+ 
+    # to update interests
+    Contract(CASSET_ADDRESS).mint(0, sender=deployer)
 
     debt_manager.updateAllocations(sender=deployer).track_gas()
 
@@ -118,3 +146,55 @@ if True:
        strat_assets = s.totalAssets()
 
        print(strat_name, strat_funds / (10 ** vault.decimals()), strat_assets / (10 ** vault.decimals()))
+
+    for s in strategies: 
+       # take profits
+       vault.process_report(s.address, sender=deployer)
+
+       strat_name = s.name()
+       strat_funds = vault.strategies(s.address).current_debt
+       strat_assets = s.totalAssets()
+
+       print(strat_name, strat_funds / (10 ** vault.decimals()), strat_assets / (10 ** vault.decimals()))
+ 
+    tx = debt_manager.estimateAdjustPosition()
+    print(tx.items())
+    debt_manager.updateAllocations(sender=deployer)
+
+    for s in strategies: 
+       strat_name = s.name()
+       strat_funds = vault.strategies(s.address).current_debt
+       strat_assets = s.totalAssets()
+
+       print(strat_name, strat_funds / (10 ** vault.decimals()), strat_assets / (10 ** vault.decimals()))
+    # let 1 week pass
+    chain.mine(timestamp=chain.pending_timestamp + 7 * 24 * 3600)
+ 
+    if unwind_vault:
+        print("UNWINDING VAULT")
+        for s in strategies: 
+            # take profits
+            vault.process_report(s.address, sender=deployer)
+            if vault.strategies(s.address).current_debt != 0:
+                vault.update_debt(s.address, int(0), sender=deployer)
+            strat_name = s.name()
+            strat_funds = vault.strategies(s.address).current_debt
+            strat_assets = s.totalAssets()
+
+            print(strat_name, strat_funds / (10 ** vault.decimals()), strat_assets / (10 ** vault.decimals()))
+
+        chain.mine(timestamp=chain.pending_timestamp + 7 * 24 * 3600)
+        vault.redeem(vault.balanceOf(whale.address), whale.address, whale.address, [strategies[0], strategies[2]], sender=whale)
+
+        print("Vault total assets:", vault.totalAssets())
+#    else:
+#        for s in strategies:
+#            vault.process_report(s.address, sender=deployer)
+#            strat_name = s.name()
+#            strat_funds = vault.strategies(s.address).current_debt
+#            strat_assets = s.totalAssets()
+#
+#            print(strat_name, strat_funds / (10 ** vault.decimals()), strat_assets / (10 ** vault.decimals()))
+#
+#        # chain.mine(timestamp=chain.pending_timestamp + 7 * 24 * 3600)
+#        vault.redeem(vault.balanceOf(whale.address), whale.address, whale.address, [strategies[0], strategies[2]], sender=whale)

@@ -18,16 +18,19 @@ class ROLES(IntFlag):
     DEBT_MANAGER = 2
     EMERGENCY_MANAGER = 4
     ACCOUNTING_MANAGER = 8
+    KEEPER = 16
 
 
-def deploy_and_setup(test=False):
+def deploy_and_setup(test=True):
     print("ChainID", chain.chain_id)
     publish_flag = False
     if chain.chain_id == 1:
         publish_flag = True
-    # if input("Do you want to continue?") == "n":
-        # return
+
+    if input("Do you want to continue?") == "n":
+        return
     
+
     # we default to local node
     vault_factory = project.dependencies["yearn-vaults-v3"]["master"].VaultFactory
     vault = project.dependencies["yearn-vaults-v3"]["master"].VaultV3
@@ -37,9 +40,10 @@ def deploy_and_setup(test=False):
     strategy_comp_v2 = project.dependencies["strategy-comp-v2"]["master"].Strategy
     
     deployer = accounts.load("v3_deployer")
-    deployer.set_autosign(True)
+    #deployer.set_autosign(True)
     from copy import deepcopy
 
+    print("Init balance:", deployer.balance/1e18)
     vault_copy = deepcopy(vault)
 
     # generate and deploy blueprint 
@@ -53,22 +57,21 @@ def deploy_and_setup(test=False):
     vault_copy.contract_type.deployment_bytecode.bytecode = deploy_bytecode
     vault_copy.contract_type.name = f"{vault_copy.contract_type.name} Blueprint"
 
-    blueprint_address = deployer.deploy(vault_copy, ZERO_ADDRESS, "", "", ZERO_ADDRESS, 0).address
+    blueprint_address = deployer.deploy(vault_copy, ZERO_ADDRESS, "", "", ZERO_ADDRESS, 0, publish=publish_flag).address
     
     # deploy factory
     factory = deployer.deploy(vault_factory, "_TEST_ Vault V3 Factory", blueprint_address, max_priority_fee="1 gwei", max_fee="100 gwei", publish=publish_flag)
     
     # deploy first vault
-    tx = factory.deploy_new_vault(ASSET_ADDRESS, "Yearn USDC V3", "yvUSDC", deployer.address, 7 * 24 * 3600,max_priority_fee="1 gwei", max_fee="100 gwei", sender=deployer)
+    tx = factory.deploy_new_vault(ASSET_ADDRESS, "Yearn USDC V3", "yvUSDC", deployer.address, 7 * 24 * 3600, max_priority_fee="1 gwei", max_fee="100 gwei", sender=deployer)
     event = list(tx.decode_logs())
     vault = vault.at(event[0].vault_address)
     
     vault.set_role(deployer.address, ROLES.STRATEGY_MANAGER | ROLES.DEBT_MANAGER | ROLES.EMERGENCY_MANAGER | ROLES.ACCOUNTING_MANAGER, sender=deployer)
     
     # deploy debt lender
-    debt_manager = deployer.deploy(debtmanager, vault.address, max_priority_fee="1 gwei", max_fee="100 gwei", sender=deployer)
-        
-    vault.set_role(debt_manager.address, ROLES.DEBT_MANAGER, sender=deployer)
+    debt_manager = deployer.deploy(debtmanager, vault.address, max_priority_fee="1 gwei", max_fee="100 gwei", publish=publish_flag)
+    vault.set_role(debt_manager.address, ROLES.DEBT_MANAGER |  ROLES.ACCOUNTING_MANAGER | ROLES.KEEPER, sender=deployer)
 
     strategies = []
     
@@ -91,7 +94,7 @@ def deploy_and_setup(test=False):
     for s in strategies:
         vault.add_strategy(s.address, max_priority_fee="1 gwei", max_fee="100 gwei", sender=deployer)
         debt_manager.addStrategy(s.address, max_priority_fee="1 gwei", max_fee="100 gwei", sender=deployer)
-        vault.update_max_debt_for_strategy(s.address, int(2 * total_assets), max_priority_fee="1 gwei", max_fee="100 gwei", sender=deployer)
+        vault.update_max_debt_for_strategy(s.address, int(3 * total_assets), max_priority_fee="1 gwei", max_fee="100 gwei", sender=deployer)
      
     print("DEPLOYER:", deployer.address)
     print("Vault:", vault.address)
@@ -99,6 +102,9 @@ def deploy_and_setup(test=False):
     print("Strategies:")
     for s in strategies:
         print("\t", s.name(), s.address)
+
+
+    print("End balance:", deployer.balance/1e18)
 
     if test:
         test_vault(deployer, vault, debt_manager, strategies, total_assets)
@@ -198,3 +204,7 @@ def test_vault(deployer, vault, debt_manager, strategies, total_assets, unwind_v
 #
 #        # chain.mine(timestamp=chain.pending_timestamp + 7 * 24 * 3600)
 #        vault.redeem(vault.balanceOf(whale.address), whale.address, whale.address, [strategies[0], strategies[2]], sender=whale)
+
+
+def main():
+    deploy_and_setup()

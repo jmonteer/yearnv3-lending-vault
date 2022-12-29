@@ -38,7 +38,7 @@ def deploy_and_setup(test=True):
     strategy_comp_v3 = project.dependencies["strategy-comp-v3"]["master"].Strategy
     strategy_aave_v2 = project.dependencies["strategy-aave-v2"]["master"].Strategy
     strategy_comp_v2 = project.dependencies["strategy-comp-v2"]["master"].Strategy
-    
+    accountant = project.dependencies["debt-manager"]["master"].SimpleRefundsAccountant
     deployer = accounts.load("v3_deployer")
     #deployer.set_autosign(True)
     from copy import deepcopy
@@ -73,6 +73,9 @@ def deploy_and_setup(test=True):
     debt_manager = deployer.deploy(debtmanager, vault.address, max_priority_fee="1 gwei", max_fee="100 gwei", publish=publish_flag)
     vault.set_role(debt_manager.address, ROLES.DEBT_MANAGER |  ROLES.ACCOUNTING_MANAGER | ROLES.KEEPER, sender=deployer)
 
+    accountant = deployer.deploy(accountant, int(0), int(2000), max_priority_fee="1 gwei", max_fee="100 gwei", publish=publish_flag)
+    vault.set_accountant(accountant, sender=deployer)
+
     strategies = []
     
     # deploy Aave V2 strategy
@@ -99,6 +102,7 @@ def deploy_and_setup(test=True):
     print("DEPLOYER:", deployer.address)
     print("Vault:", vault.address)
     print("Debt Manager:", debt_manager.address)
+    print("Accountant:", accountant.address)
     print("Strategies:")
     for s in strategies:
         print("\t", s.name(), s.address)
